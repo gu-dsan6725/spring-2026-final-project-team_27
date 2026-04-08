@@ -16,7 +16,8 @@
 8. [Preliminary Results](#preliminary-results)
 9. [Installation](#installation)
 10. [Usage](#usage)
-11. [Project Structure](#project-structure)
+11. [Multi-Session Data Collection](#multi-session-data-collection)
+12. [Project Structure](#project-structure)
 
 ---
 
@@ -229,6 +230,25 @@ fear_greed_label     str       e.g. "Greed", "Fear", "Neutral"
 
 ---
 
+### EnsembleAgent
+
+Replaces the single `AnalyzerAgent` with a three-model voting system for more robust predictions.
+
+**Models used (in parallel):**
+
+| Role | Model | Analytical Lens |
+|------|-------|----------------|
+| Momentum Trader | `claude-haiku-4-5` | Pure price action, fast/cheap |
+| Technical Analyst | `claude-sonnet-4-5` | Balanced signal weighting |
+| Contrarian | `claude-sonnet-4-6` | Market microstructure, mean reversion |
+
+**Aggregation logic:**
+- Majority vote determines direction (UP/DOWN)
+- Confidence weighted by agreement level: unanimous → +0.02 boost, split → −0.02 discount
+- Returns a single aggregated `Prediction`
+
+---
+
 ### AnalyzerAgent
 
 Sends the `MarketWindow` to Claude Sonnet and parses a structured JSON prediction.
@@ -286,6 +306,44 @@ Aggregates all `EvalRecord`s and produces a formatted accuracy report. Runs at t
 
 ---
 
+### DebateAgent *(optional — planned upgrade)*
+
+An alternative prediction mode that replaces the ensemble vote with a structured adversarial debate between two heterogeneous LLMs, mediated by a Claude judge.
+
+| Round | Action |
+|-------|--------|
+| 1 | Groq (Llama 3.3-70b) and OpenAI (GPT-4o-mini) independently analyze the market in parallel |
+| 2 | Each model reads the other's argument and writes a rebuttal |
+| 3 | Claude Sonnet reads all four outputs and delivers a final UP/DOWN verdict |
+
+**Activation**: add `GROQ_API_KEY` and `OPENAI_API_KEY` to `.env` and install `pip install groq openai`. The system detects the keys automatically and switches to DebateAgent — no other code changes needed. Without the keys, it falls back to EnsembleAgent silently.
+
+> **Current status**: The DebateAgent is implemented as a skeleton and is optional while the EnsembleAgent accumulates a two-week baseline of results. If the simulated account shows solid profitability after that run, the plan is to migrate the entire prediction pipeline to the debate-judge architecture and retire the ensemble. The two-week test period provides a direct performance benchmark to inform that decision.
+
+---
+
+### Simulator
+
+Paper trading engine that tracks a simulated $100,000 account, placing $500 bets on each prediction using live Polymarket odds.
+
+**Mechanics:**
+- Flat $500 bet per trade
+- Winning token pays $1.00 → profit = `bet × (1/odds_price − 1)`
+- Tracks running balance, P&L, win rate, and ROI
+
+**Current status (72 predictions, 16 trades):**
+
+| Metric | Value |
+|--------|-------|
+| Starting balance | $100,000.00 |
+| Current balance | $101,671.89 |
+| Total P&L | +$1,671.89 (+1.67%) |
+| Win rate | 50% (7W / 7L) |
+
+The small positive return despite 50% accuracy is due to asymmetric payout odds — winning bets return slightly more than losses cost.
+
+---
+
 ## Evaluation Metrics
 
 | Metric | Formula | Baseline | Interpretation |
@@ -306,27 +364,30 @@ The Brier score penalises exactly this. A correct call at 99% confidence earns a
 
 ## Preliminary Results
 
-Results from **15 scored predictions** (initial session, 2026-03-26):
+Results from **71 scored predictions** (sessions 2026-03-26 through 2026-04-03):
 
 | Metric | Value | vs Baseline |
 |--------|-------|-------------|
-| Directional accuracy | **66.7%** | +16.7% above 50% coin flip |
-| Brier score | **0.2596** | ~random (0.25) — calibration needs work |
-| UP calls | 3 (20%) | — |
-| DOWN calls | 12 (80%) | Heavy bias |
+| Directional accuracy | **49.3%** | ~50% coin flip |
+| Brier score | **0.2597** | ~random (0.25) |
+| UP calls | 39 (54%) | Slight UP bias |
+| DOWN calls | 32 (46%) | — |
 
 **Confidence Calibration:**
 
-| Bin | Predictions | Correct | Actual % | Gap | Rating |
-|-----|-------------|---------|----------|-----|--------|
-| 50–60% | 12 | 10 | 83.3% | 28.3% | Poorly calibrated |
-| 60–70% | 3 | 0 | 0.0% | 64.0% | Poorly calibrated |
+| Bin | Predictions | Actual % | Avg Conf | Gap | Rating |
+|-----|-------------|----------|----------|-----|--------|
+| 50–55% | 33 | 57.6% | 53.1% | 4.5% | Well calibrated |
+| 55–60% | 21 | 38.1% | 57.2% | 19.1% | Slightly off |
+| 60–65% | 16 | 50.0% | 62.3% | 12.3% | Slightly off |
+| 65%+ | 1 | 0.0% | 68.0% | 68.0% | Poorly calibrated |
 
 **Key observations:**
-- The model is **underconfident** in the 50–60% bin (actually correct 83% of the time)
-- The model **overperforms on DOWN calls** during a bearish session but shows UP call bias failure
-- 15 samples is insufficient for statistical conclusions — target 100+ for stable calibration estimates
-- Calibration should improve as the model accumulates more signal diversity (UP markets, neutral RSI windows)
+- Performance is indistinguishable from a coin flip at this sample size
+- The 50–55% confidence bin is the most honest — actual accuracy (57.6%) closely matches stated confidence
+- Higher confidence bins show overconfidence — model should be more conservative
+- 71 samples is still insufficient for definitive conclusions; target 500+ for stable calibration estimates
+- Ongoing data collection planned (see [Multi-Session Data Collection](#multi-session-data-collection))
 
 ---
 
@@ -371,33 +432,76 @@ python3 run.py --pending
 
 ---
 
+## Multi-Session Data Collection
+
+Since a continuous local run is impractical, data collection is conducted in discrete sessions using two helper scripts that preserve the SQLite database across sessions (e.g., AWS Academy lab windows).
+
+### Projected Data Volume
+
+Running two 3.5-hour sessions per day for two weeks:
+
+| Period | Predictions |
+|--------|-------------|
+| Per session | ~42 |
+| Per day (2 sessions) | ~84 |
+| 1 week | ~588 |
+| 2 weeks | ~1,176 |
+
+This exceeds the 500-prediction target needed for statistically stable calibration estimates.
+
+### Session Scripts
+
+**`session_start.sh`** — run at the start of each lab session:
+```bash
+./session_start.sh <EC2-IP> [path-to-key.pem]
+# Example:
+./session_start.sh 54.123.45.67 ~/Downloads/labsuser.pem
+```
+Automatically: waits for EC2 readiness → installs deps → uploads code + `.env` → restores DB from previous session → runs for 3.5 hours → downloads updated DB on completion.
+
+**`session_end.sh`** — run early if you need to interrupt before the 3.5 hours finishes:
+```bash
+./session_end.sh <EC2-IP> [path-to-key.pem]
+```
+Downloads the DB, backs up the previous local copy with a timestamp, and prints a quick stats summary.
+
+### Key default: `labsuser.pem`
+Both scripts default to `~/Downloads/labsuser.pem` — the standard AWS Academy key filename. Pass a different path as the second argument if needed.
+
+---
+
 ## Project Structure
 
 ```
 polysignal-btc-2/
-├── run.py            # Orchestrator — entry point, CLI, live mode
-├── collector.py      # BTCCollector — real-time data gathering
-├── analyzer.py       # AnalyzerAgent — Claude LLM prediction
-├── evaluator.py      # EvaluatorAgent — outcome scoring
-├── reporter.py       # Reporter — accuracy metrics & reports
-├── storage.py        # SQLite helpers (init, save, query)
-├── models.py         # Dataclasses: MarketWindow, Prediction, EvalRecord
-├── requirements.txt  # Python dependencies
-├── .env.example      # API key template
-├── .env              # Your API key (gitignored)
-├── polysignal_btc.db # SQLite database (auto-created)
-├── polysignal_btc.log# Debug log (auto-created, 10MB rotation)
-└── reports/          # Timestamped markdown accuracy reports
+├── run.py              # Orchestrator — entry point, CLI, live mode
+├── collector.py        # BTCCollector — real-time data gathering
+├── analyzer.py         # AnalyzerAgent — single Claude LLM prediction
+├── ensemble.py         # EnsembleAgent — 3-model voting (active)
+├── evaluator.py        # EvaluatorAgent — outcome scoring
+├── reporter.py         # Reporter — accuracy metrics & reports
+├── simulator.py        # Paper trading simulator ($100k account)
+├── storage.py          # SQLite helpers (init, save, query)
+├── models.py           # Dataclasses: MarketWindow, Prediction, EvalRecord
+├── requirements.txt    # Python dependencies
+├── .env.example        # API key template
+├── .env                # Your API key (gitignored)
+├── polysignal_btc.db   # SQLite database (auto-created)
+├── polysignal_btc.log  # Debug log (auto-created, 10MB rotation)
+├── session_start.sh    # Upload DB + run session on EC2
+├── session_end.sh      # Emergency DB download before lab closes
+└── reports/            # Timestamped markdown accuracy reports
 ```
 
 ---
 
 ## Limitations & Future Work
 
-- **Small sample size**: 15 predictions is not statistically meaningful. Run for several days to accumulate 200+ scored predictions.
-- **Direction bias**: The model currently over-calls DOWN. A longer session with diverse market conditions should correct this.
-- **Single model**: Only Claude Sonnet is tested. Comparing against a momentum baseline (always predict the direction of the last 1-minute candle) would establish a stronger benchmark.
-- **No feature selection**: All features are passed to the model equally. Ablation studies (removing Fear & Greed, removing RSI, etc.) could identify which signals actually contribute.
+- **Sample size**: 71 scored predictions is not sufficient for definitive statistical conclusions. Ongoing data collection targets 500+ predictions over a two-week period using the session scripts.
+- **Near-random performance**: Current accuracy (49.3%) is indistinguishable from a coin flip. Whether this reflects a fundamental limit of LLMs at 5-minute crypto prediction or a fixable calibration issue remains an open question.
+- **No baselines**: The system does not yet compare against simple rule-based strategies (momentum bot, RSI-only, always-UP). Adding these is the next priority.
+- **No feature ablation**: All signals (RSI, Fear & Greed, crowd odds) are passed to the model with equal weight. Ablation studies would identify which actually contribute.
+- **No per-model breakdown**: The ensemble logs individual votes but does not yet report per-model accuracy (Haiku vs Sonnet 4.5 vs Sonnet 4.6).
 - **Polymarket geo-restriction**: The BTC 5-min series is restricted for US users but the data API is publicly accessible. This system reads data only — no trading functionality.
 
 ---

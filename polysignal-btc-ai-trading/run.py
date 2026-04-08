@@ -99,10 +99,16 @@ async def run_once(api_key: str):
                 f"  1m Δ={window.price_change_1m:+.3f}%"
             )
 
-        # ── Step 3: Ensemble Analyze ──────────────────────────────────────────
-        console.rule("[bold cyan]Step 3 — Ensemble Analyzer[/bold cyan]")
-        ensemble   = EnsembleAgent(api_key=api_key)
-        prediction = await ensemble.analyze(window)
+        # ── Step 3: Predict (Debate if available, else Ensemble) ─────────────
+        from debate import is_available as debate_available, DebateAgent
+        if debate_available():
+            console.rule("[bold cyan]Step 3 — Debate Agent (Groq × OpenAI × Claude)[/bold cyan]")
+            agent      = DebateAgent()
+            prediction = await agent.debate(window)
+        else:
+            console.rule("[bold cyan]Step 3 — Ensemble Analyzer[/bold cyan]")
+            ensemble   = EnsembleAgent(api_key=api_key)
+            prediction = await ensemble.analyze(window)
 
         if prediction:
             save_prediction(prediction)
