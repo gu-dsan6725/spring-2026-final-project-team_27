@@ -306,19 +306,38 @@ Aggregates all `EvalRecord`s and produces a formatted accuracy report. Runs at t
 
 ---
 
-### DebateAgent *(optional — planned upgrade)*
+### DebateAgent *(optional — fully implemented)*
 
 An alternative prediction mode that replaces the ensemble vote with a structured adversarial debate between two heterogeneous LLMs, mediated by a Claude judge.
 
 | Round | Action |
 |-------|--------|
-| 1 | Groq (Llama 3.3-70b) and OpenAI (GPT-4o-mini) independently analyze the market in parallel |
+| 1 | xAI Grok-3-mini (momentum) and OpenAI GPT-4o-mini (contrarian) independently analyze the market in parallel |
 | 2 | Each model reads the other's argument and writes a rebuttal |
-| 3 | Claude Sonnet reads all four outputs and delivers a final UP/DOWN verdict |
+| 3 | Claude Sonnet 4.6 reads all four outputs and delivers a final UP/DOWN verdict |
 
-**Activation**: add `GROQ_API_KEY` and `OPENAI_API_KEY` to `.env` and install `pip install groq openai`. The system detects the keys automatically and switches to DebateAgent — no other code changes needed. Without the keys, it falls back to EnsembleAgent silently.
+**Activation**: add `XAI_API_KEY` and `OPENAI_API_KEY` to `.env`. The system detects the keys automatically and switches to DebateAgent — no other code changes needed. Without the keys, it falls back to EnsembleAgent silently.
 
-> **Current status**: The DebateAgent is implemented as a skeleton and is optional while the EnsembleAgent accumulates a two-week baseline of results. If the simulated account shows solid profitability after that run, the plan is to migrate the entire prediction pipeline to the debate-judge architecture and retire the ensemble. The two-week test period provides a direct performance benchmark to inform that decision.
+> **Current status**: DebateAgent is the primary prediction mode used in the final evaluation session (191 predictions, April 24, 2026). It achieved 57.6% directional accuracy, outperforming the Polymarket crowd baseline of 55.0%.
+
+---
+
+### Dashboard
+
+A Streamlit performance dashboard for visualising results from the local SQLite database.
+
+**Run locally:**
+```bash
+streamlit run dashboard.py
+```
+
+**Requires:** `pip install streamlit plotly pandas` (included in `requirements.txt`)
+
+**Displays:**
+- Cumulative P&L curve and per-trade results (simulated account)
+- Directional accuracy over time
+- Confidence calibration scatter plots
+- Raw prediction/trade tables
 
 ---
 
@@ -331,16 +350,16 @@ Paper trading engine that tracks a simulated $100,000 account, placing $500 bets
 - Winning token pays $1.00 → profit = `bet × (1/odds_price − 1)`
 - Tracks running balance, P&L, win rate, and ROI
 
-**Current status (72 predictions, 16 trades):**
+**Final results (191 predictions · 16-hour session · April 24, 2026):**
 
 | Metric | Value |
 |--------|-------|
 | Starting balance | $100,000.00 |
-| Current balance | $101,671.89 |
-| Total P&L | +$1,671.89 (+1.67%) |
-| Win rate | 50% (7W / 7L) |
+| Final balance | **$113,321.74** |
+| Total P&L | **+$13,321.74 (+13.32%)** |
+| Win / Loss | 110W / 81L (57.6% win rate) |
 
-The small positive return despite 50% accuracy is due to asymmetric payout odds — winning bets return slightly more than losses cost.
+The positive ROI is consistent with the 57.6% directional accuracy at near-even Polymarket odds (~50.5 cents per token).
 
 ---
 
@@ -362,32 +381,33 @@ The Brier score penalises exactly this. A correct call at 99% confidence earns a
 
 ---
 
-## Preliminary Results
+## Final Results
 
-Results from **71 scored predictions** (sessions 2026-03-26 through 2026-04-03):
+Results from **191 scored predictions** — continuous 16-hour session, April 24, 2026:
 
 | Metric | Value | vs Baseline |
 |--------|-------|-------------|
-| Directional accuracy | **49.3%** | ~50% coin flip |
-| Brier score | **0.2597** | ~random (0.25) |
-| UP calls | 39 (54%) | Slight UP bias |
-| DOWN calls | 32 (46%) | — |
+| Directional accuracy | **57.6% ± 7.0%** | +7.6% vs coin flip |
+| 95% CI lower bound | **50.6%** | Statistically above coin flip |
+| Brier score | **0.2474** | Below random (0.2500) |
+| Crowd baseline (Polymarket) | 55.0% | PolySignal +2.6% |
+| Simulated ROI | **+13.32%** | $100k → $113,321 |
+
+**Per-Model Accuracy:**
+
+| Model | Role | Accuracy | Brier |
+|-------|------|----------|-------|
+| xAI Grok-3-mini | Momentum analyst | **59.6%** | **0.2436** |
+| Claude Sonnet 4.6 | Judge | **57.4%** | 0.2469 |
+| OpenAI GPT-4o-mini | Contrarian | 49.5% | 0.2532 |
 
 **Confidence Calibration:**
 
-| Bin | Predictions | Actual % | Avg Conf | Gap | Rating |
-|-----|-------------|----------|----------|-----|--------|
-| 50–55% | 33 | 57.6% | 53.1% | 4.5% | Well calibrated |
-| 55–60% | 21 | 38.1% | 57.2% | 19.1% | Slightly off |
-| 60–65% | 16 | 50.0% | 62.3% | 12.3% | Slightly off |
-| 65%+ | 1 | 0.0% | 68.0% | 68.0% | Poorly calibrated |
-
-**Key observations:**
-- Performance is indistinguishable from a coin flip at this sample size
-- The 50–55% confidence bin is the most honest — actual accuracy (57.6%) closely matches stated confidence
-- Higher confidence bins show overconfidence — model should be more conservative
-- 71 samples is still insufficient for definitive conclusions; target 500+ for stable calibration estimates
-- Ongoing data collection planned (see [Multi-Session Data Collection](#multi-session-data-collection))
+| Bin | N | Actual % | Avg Conf | Gap | Rating |
+|-----|---|----------|----------|-----|--------|
+| 50–55% | **180** | 57.2% | 52.8% | **4.4%** | **Well calibrated** |
+| 55–60% | 10 | 70.0% | 55.0% | 15.0% | Slightly off |
+| 60–65% | 1 | 0.0% | 61.3% | 61.3% | Insufficient data |
 
 ---
 
@@ -473,24 +493,44 @@ Both scripts default to `~/Downloads/labsuser.pem` — the standard AWS Academy 
 ## Project Structure
 
 ```
-polysignal-btc-2/
-├── run.py              # Orchestrator — entry point, CLI, live mode
-├── collector.py        # BTCCollector — real-time data gathering
-├── analyzer.py         # AnalyzerAgent — single Claude LLM prediction
-├── ensemble.py         # EnsembleAgent — 3-model voting (active)
-├── evaluator.py        # EvaluatorAgent — outcome scoring
-├── reporter.py         # Reporter — accuracy metrics & reports
-├── simulator.py        # Paper trading simulator ($100k account)
-├── storage.py          # SQLite helpers (init, save, query)
-├── models.py           # Dataclasses: MarketWindow, Prediction, EvalRecord
-├── requirements.txt    # Python dependencies
-├── .env.example        # API key template
-├── .env                # Your API key (gitignored)
-├── polysignal_btc.db   # SQLite database (auto-created)
-├── polysignal_btc.log  # Debug log (auto-created, 10MB rotation)
-├── session_start.sh    # Upload DB + run session on EC2
-├── session_end.sh      # Emergency DB download before lab closes
-└── reports/            # Timestamped markdown accuracy reports
+polysignal-btc-ai-trading/
+├── run.py                      # Entry point — CLI, one-shot and live mode
+├── dashboard.py                # Streamlit performance dashboard
+│
+├── polysignal/                 # Core Python package
+│   ├── models.py               # Pydantic contracts: MarketWindow, Prediction, EvalRecord, Trade
+│   ├── storage.py              # SQLite persistence (init, save, query)
+│   ├── collector.py            # BTCCollector — real-time data gathering
+│   ├── ensemble.py             # EnsembleAgent — 3-model parallel voting
+│   ├── debate.py               # DebateAgent — adversarial Groq×OpenAI×Claude debate
+│   ├── evaluator.py            # EvaluatorAgent — outcome scoring + Brier
+│   ├── reporter.py             # Metrics, baselines, calibration, per-model breakdown
+│   ├── simulator.py            # Paper trading simulator ($100k account)
+│   └── analyzer.py             # Single-model AnalyzerAgent (legacy / comparison)
+│
+├── tests/                      # Unit tests — 147 tests, no API calls required
+│   ├── test_models.py          # Pydantic model validation
+│   ├── test_evaluator_logic.py # Brier score + outcome determination
+│   ├── test_reporter.py        # compute_metrics — accuracy, Brier, calibration bins
+│   ├── test_ensemble_logic.py  # JSON parsing + vote aggregation (_aggregate)
+│   ├── test_simulator_logic.py # Payout math + settlement + EV analysis
+│   ├── test_baselines.py       # compute_baselines, compute_per_model_accuracy, _ci95
+│   └── test_collector_logic.py # RSI, pct_change, Polymarket odds parser
+│
+├── scripts/                    # EC2 session management (AWS Academy lab workflow)
+│   ├── session_start.sh        # Upload DB + install deps + run session
+│   └── session_end.sh          # Emergency DB download before lab closes
+│
+├── docs/                       # Project documentation
+│   ├── architecture.md         # Full system architecture writeup (Milestone 3)
+│   └── milestone_notes.md      # GitHub issue tracking and milestone notes
+│
+├── reports/                    # Auto-generated accuracy reports (gitignored)
+├── polysignal_btc.db           # SQLite database (auto-created, gitignored)
+├── polysignal_btc.log          # Debug log, 10MB rotation (gitignored)
+├── requirements.txt
+├── .env.example
+└── README.md
 ```
 
 ---

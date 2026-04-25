@@ -8,8 +8,8 @@ import httpx
 from datetime import datetime, timezone
 from typing import Optional
 from loguru import logger
-from models import EvalRecord
-from storage import get_pending_predictions, save_eval, mark_resolved
+from .models import EvalRecord
+from .storage import get_pending_predictions, save_eval, mark_resolved
 
 KRAKEN = "https://api.kraken.com"
 

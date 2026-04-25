@@ -6,7 +6,11 @@ pydantic-settings>=2.0.0
 python-dotenv>=1.0.0
 rich>=13.0.0
 loguru>=0.7.0
-# Dashboard
+# Dashboard (streamlit run dashboard.py)
 streamlit>=1.35.0
 plotly>=5.22.0
 pandas>=2.0.0
+# DebateAgent — requires both keys in .env (XAI_API_KEY + OPENAI_API_KEY)
+openai>=1.0.0
+# Tests
+pytest>=8.0.0

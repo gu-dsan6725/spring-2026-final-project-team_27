@@ -1,8 +1,10 @@
 # Data and reports
 reports/
 latest_analysis.md
-*.db
 *.log
+# Live DB (runtime) — ignored. Final DB lives in data/ and IS committed.
+polysignal_btc.db
+polysignal_btc_archive*.db
 
 # Python
 __pycache__/

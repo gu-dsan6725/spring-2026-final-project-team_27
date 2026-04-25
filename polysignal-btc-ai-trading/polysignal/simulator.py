@@ -16,8 +16,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 from loguru import logger
-from models import Prediction, MarketWindow, Trade
-from storage import (
+from .models import Prediction, MarketWindow, Trade
+from .storage import (
     save_trade, settle_trade, get_trade_by_prediction,
     get_account_balance, get_all_trades, INITIAL_BALANCE
 )

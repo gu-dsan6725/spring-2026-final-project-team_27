@@ -4,15 +4,21 @@ reporter.py — Accuracy metrics for BTC 5-Min predictions.
 Computes:
   - Directional accuracy overall and by confidence bin
   - Brier score (calibration quality)
-  - Profit-equivalent analysis (if you had traded at your stated confidence)
+  - Baseline comparisons (coin flip, always-UP, always-DOWN, crowd-following)
+  - Per-model accuracy breakdown (parsed from ensemble reasoning field)
+  - 95% confidence intervals on all accuracy estimates
 """
+import json
+import math
+import re
 from pathlib import Path
 from datetime import datetime
+from typing import Optional
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 from rich import box
-from storage import get_all_evals, get_recent_predictions, db_summary, INITIAL_BALANCE
+from .storage import get_all_evals, get_recent_predictions, db_summary, INITIAL_BALANCE
 
 console = Console()
 REPORTS = Path("reports")
@@ -23,6 +29,161 @@ BINS = [
     ("60–65%", 0.60, 0.65),
     ("65%+",   0.65, 1.01),
 ]
+
+
+def _ci95(p: float, n: int) -> float:
+    """Wilson-approximation 95% confidence interval half-width."""
+    if n == 0:
+        return 0.0
+    return 1.96 * math.sqrt(p * (1 - p) / n)
+
+
+def compute_baselines(resolved_preds: list[dict]) -> dict:
+    """
+    Accuracy and Brier score for four dumb baselines, computed on the same
+    resolved predictions the model was scored on.
+
+    Baselines:
+      coin_flip    — always predict 50/50 (theoretical reference)
+      always_up    — predict UP every time, confidence = 1.0
+      always_down  — predict DOWN every time, confidence = 1.0
+      crowd        — predict whichever direction has Polymarket odds > 0.5,
+                     using the raw odds price as the predicted probability
+    """
+    if not resolved_preds:
+        return {}
+
+    n = len(resolved_preds)
+    up_outcomes = sum(1 for r in resolved_preds if r["actual_outcome"] == "UP")
+    up_rate = up_outcomes / n
+
+    def _brier_constant(pred_prob: float, actual_outcome_col: str) -> float:
+        return sum(
+            (pred_prob - (1.0 if r["actual_outcome"] == actual_outcome_col else 0.0)) ** 2
+            for r in resolved_preds
+        ) / n
+
+    always_up_acc   = up_rate
+    always_up_brier = _brier_constant(1.0, "UP")
+
+    always_down_acc   = 1.0 - up_rate
+    always_down_brier = _brier_constant(1.0, "DOWN")
+
+    # Crowd: directional accuracy uses majority odds; Brier uses actual odds probability
+    crowd_correct = sum(
+        1 for r in resolved_preds
+        if (r["market_up_odds"] > 0.5 and r["actual_outcome"] == "UP") or
+           (r["market_up_odds"] <= 0.5 and r["actual_outcome"] == "DOWN")
+    )
+    crowd_acc   = crowd_correct / n
+    crowd_brier = sum(
+        (r["market_up_odds"] - (1.0 if r["actual_outcome"] == "UP" else 0.0)) ** 2
+        for r in resolved_preds
+    ) / n
+
+    return {
+        "n":           n,
+        "up_rate":     round(up_rate, 3),
+        "coin_flip":   {"accuracy": 0.500, "brier": 0.2500, "ci": 0.0},
+        "always_up":   {
+            "accuracy": round(always_up_acc, 3),
+            "brier":    round(always_up_brier, 4),
+            "ci":       round(_ci95(always_up_acc, n), 3),
+        },
+        "always_down": {
+            "accuracy": round(always_down_acc, 3),
+            "brier":    round(always_down_brier, 4),
+            "ci":       round(_ci95(always_down_acc, n), 3),
+        },
+        "crowd": {
+            "accuracy": round(crowd_acc, 3),
+            "brier":    round(crowd_brier, 4),
+            "ci":       round(_ci95(crowd_acc, n), 3),
+        },
+    }
+
+
+def _record(models: dict, label: str, direction: str, confidence: float, actual: str):
+    correct = (direction.upper() == actual)
+    brier   = (confidence - (1.0 if correct else 0.0)) ** 2
+    if label not in models:
+        models[label] = {"total": 0, "correct": 0, "brier_sum": 0.0}
+    models[label]["total"]     += 1
+    models[label]["correct"]   += int(correct)
+    models[label]["brier_sum"] += brier
+
+
+def compute_per_model_accuracy(resolved_preds: list[dict]) -> dict:
+    """
+    Parse individual model contributions from both Ensemble and Debate predictions.
+
+    Ensemble format — parses Votes JSON embedded in reasoning:
+      Haiku (Momentum), Sonnet (Technical), Sonnet 4.6 (Contrarian)
+
+    Debate format — parses key_factors and prediction direction:
+      xAI (Grok), OpenAI (GPT-4o-mini), Claude (Judge)
+    """
+    models: dict = {}
+
+    for r in resolved_preds:
+        reasoning = r.get("reasoning", "")
+        actual    = r.get("actual_outcome")
+        if not actual:
+            continue
+
+        # ── Ensemble predictions ──────────────────────────────────────────────
+        if reasoning.startswith("[ENSEMBLE"):
+            m = re.search(r'Votes: (\[.*?\])', reasoning)
+            if not m:
+                continue
+            try:
+                votes = json.loads(m.group(1))
+            except Exception:
+                continue
+            for vote in votes:
+                _record(models,
+                        label      = vote.get("model", "unknown"),
+                        direction  = str(vote.get("direction", "")),
+                        confidence = float(vote.get("confidence", 0.5)),
+                        actual     = actual)
+
+        # ── Debate predictions ────────────────────────────────────────────────
+        elif reasoning.startswith("[DEBATE"):
+            kf_raw = r.get("key_factors", "[]")
+            try:
+                kf_list = json.loads(kf_raw) if isinstance(kf_raw, str) else kf_raw
+            except Exception:
+                kf_list = []
+
+            for item in kf_list:
+                # "xAI final: DOWN @ 55%" or "OpenAI final: UP @ 52%"
+                fm = re.match(r'(xAI|OpenAI) final: (UP|DOWN) @ (\d+)%', str(item))
+                if fm:
+                    label      = "xAI (Grok)" if fm.group(1) == "xAI" else "OpenAI (GPT-4o-mini)"
+                    direction  = fm.group(2)
+                    confidence = float(fm.group(3)) / 100.0
+                    _record(models, label, direction, confidence, actual)
+
+            # Claude judge = the final prediction itself
+            _record(models,
+                    label      = "Claude (Judge)",
+                    direction  = r.get("direction", ""),
+                    confidence = float(r.get("confidence", 0.5)),
+                    actual     = actual)
+
+    result = {}
+    for label, d in models.items():
+        t = d["total"]
+        c = d["correct"]
+        acc = c / t if t > 0 else 0.0
+        result[label] = {
+            "total":     t,
+            "correct":   c,
+            "accuracy":  round(acc, 3),
+            "avg_brier": round(d["brier_sum"] / t, 4) if t > 0 else 0.0,
+            "ci":        round(_ci95(acc, t), 3),
+        }
+    return result
 
 
 def compute_metrics(evals: list[dict]) -> dict:
@@ -55,10 +216,12 @@ def compute_metrics(evals: list[dict]) -> dict:
             "gap":      round(abs(c/t - avg), 3),
         }
 
+    acc = correct / total
     return {
         "total":               total,
         "correct":             correct,
-        "accuracy":            round(correct/total, 3),
+        "accuracy":            round(acc, 3),
+        "accuracy_ci":         round(_ci95(acc, total), 3),
         "avg_brier":           round(brier, 4),
         "avg_price_move_pct":  round(avg_chg, 4),
         "up_calls":            up_calls,
@@ -67,7 +230,9 @@ def compute_metrics(evals: list[dict]) -> dict:
     }
 
 
-def print_report(metrics: dict, summary: dict):
+def print_report(metrics: dict, summary: dict,
+                 baselines: Optional[dict] = None,
+                 per_model: Optional[dict] = None):
     if not metrics:
         console.print(Panel(
             "[dim]No scored predictions yet.\n"
@@ -78,19 +243,20 @@ def print_report(metrics: dict, summary: dict):
         return
 
     acc = metrics["accuracy"]
+    ci  = metrics.get("accuracy_ci", 0.0)
     col = "green" if acc >= 0.55 else "yellow" if acc >= 0.50 else "red"
 
     # ── Overall ───────────────────────────────────────────────────────────────
     t = Table(title="BTC 5-Min Prediction Accuracy", box=box.ROUNDED)
     t.add_column("Metric",  style="cyan",       width=30)
-    t.add_column("Value",   style="bold white",  width=20)
+    t.add_column("Value",   style="bold white",  width=22)
     t.add_column("Note",    style="dim",          width=32)
 
     t.add_row("Windows predicted",  str(metrics["total"]),  "")
     t.add_row("Correct calls",      str(metrics["correct"]), "")
     t.add_row("Directional accuracy",
-              f"[{col}]{acc:.1%}[/{col}]",
-              "Coin-flip baseline = 50%")
+              f"[{col}]{acc:.1%} ± {ci:.1%}[/{col}]",
+              "95% CI  |  coin-flip = 50%")
     t.add_row("Avg Brier score",
               f"{metrics['avg_brier']:.4f}",
               "Perfect=0  Random=0.25")
@@ -101,6 +267,49 @@ def print_report(metrics: dict, summary: dict):
     t.add_row("DOWN calls", str(metrics["down_calls"]), "")
     console.print(t)
     console.print()
+
+    # ── Baseline comparison ───────────────────────────────────────────────────
+    if baselines:
+        model_acc   = metrics["accuracy"]
+        model_brier = metrics["avg_brier"]
+        model_ci    = metrics.get("accuracy_ci", 0.0)
+
+        bt = Table(title="Baseline Comparison", box=box.ROUNDED)
+        bt.add_column("Strategy",    style="cyan",       width=22)
+        bt.add_column("Accuracy",    width=18, justify="center")
+        bt.add_column("Brier Score", width=14, justify="center")
+        bt.add_column("Notes",       style="dim",        width=26)
+
+        def _acc_str(a, ci=0.0, bold=False):
+            col = "green" if a >= 0.55 else "yellow" if a >= 0.50 else "red"
+            s = f"{a:.1%}" + (f" ± {ci:.1%}" if ci else "")
+            return f"[bold {col}]{s}[/bold {col}]" if bold else f"[{col}]{s}[/{col}]"
+
+        bt.add_row("PolySignal (ours)",
+                   _acc_str(model_acc, model_ci, bold=True),
+                   f"[bold]{model_brier:.4f}[/bold]",
+                   "Multi-agent ensemble")
+        bt.add_row("Coin flip",
+                   _acc_str(0.50),
+                   "0.2500",
+                   "Theoretical lower bound")
+        bt.add_row("Always UP",
+                   _acc_str(baselines["always_up"]["accuracy"],
+                            baselines["always_up"]["ci"]),
+                   f"{baselines['always_up']['brier']:.4f}",
+                   f"UP rate = {baselines['up_rate']:.1%}")
+        bt.add_row("Always DOWN",
+                   _acc_str(baselines["always_down"]["accuracy"],
+                            baselines["always_down"]["ci"]),
+                   f"{baselines['always_down']['brier']:.4f}",
+                   "")
+        bt.add_row("Crowd (Polymarket odds)",
+                   _acc_str(baselines["crowd"]["accuracy"],
+                            baselines["crowd"]["ci"]),
+                   f"{baselines['crowd']['brier']:.4f}",
+                   "Follow majority odds")
+        console.print(bt)
+        console.print()
 
     # ── Confidence bins ───────────────────────────────────────────────────────
     if metrics["bins"]:
@@ -126,6 +335,29 @@ def print_report(metrics: dict, summary: dict):
         console.print(bt)
         console.print()
 
+    # ── Per-model breakdown ───────────────────────────────────────────────────
+    if per_model:
+        mt = Table(title="Per-Model Accuracy (Ensemble Votes)", box=box.ROUNDED)
+        mt.add_column("Model",    style="cyan",       width=28)
+        mt.add_column("Votes",    width=7,  justify="center")
+        mt.add_column("Correct",  width=9,  justify="center")
+        mt.add_column("Accuracy", width=16, justify="center")
+        mt.add_column("Brier",    width=10, justify="center")
+
+        for label, d in sorted(per_model.items()):
+            a   = d["accuracy"]
+            ci  = d.get("ci", 0.0)
+            col = "green" if a >= 0.55 else "yellow" if a >= 0.50 else "red"
+            mt.add_row(
+                label,
+                str(d["total"]),
+                str(d["correct"]),
+                f"[{col}]{a:.1%} ± {ci:.1%}[/{col}]",
+                f"{d['avg_brier']:.4f}",
+            )
+        console.print(mt)
+        console.print()
+
     # ── Pipeline ──────────────────────────────────────────────────────────────
     st = Table(title="Pipeline Summary", box=box.ROUNDED)
     st.add_column("Metric", style="cyan", width=26)
@@ -137,7 +369,9 @@ def print_report(metrics: dict, summary: dict):
     console.print(st)
 
 
-def save_report(metrics: dict, summary: dict, newly_scored: list) -> Path:
+def save_report(metrics: dict, summary: dict, newly_scored: list,
+                baselines: Optional[dict] = None,
+                per_model: Optional[dict] = None) -> Path:
     REPORTS.mkdir(exist_ok=True)
     ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = REPORTS / f"btc_report_{ts}.md"
@@ -159,11 +393,12 @@ def save_report(metrics: dict, summary: dict, newly_scored: list) -> Path:
     if not metrics:
         lines.append("_No scored predictions yet._")
     else:
+        ci = metrics.get("accuracy_ci", 0.0)
         lines += [
             "## Overall Accuracy",
             f"| Metric | Value | Note |",
             f"|--------|-------|------|",
-            f"| Directional accuracy | {metrics['accuracy']:.1%} | Coin-flip = 50% |",
+            f"| Directional accuracy | {metrics['accuracy']:.1%} ± {ci:.1%} | 95% CI  \\|  Coin-flip = 50% |",
             f"| Avg Brier score | {metrics['avg_brier']:.4f} | Perfect=0, Random=0.25 |",
             f"| UP calls | {metrics['up_calls']} | |",
             f"| DOWN calls | {metrics['down_calls']} | |",
@@ -179,6 +414,33 @@ def save_report(metrics: dict, summary: dict, newly_scored: list) -> Path:
                 f"| {label} | {s['total']} | {s['correct']} | "
                 f"{s['accuracy']:.1%} | {g:.1%} | {cal} |"
             )
+
+        if baselines:
+            b = baselines
+            lines += [
+                "",
+                "## Baseline Comparison",
+                "| Strategy | Accuracy | Brier Score | Notes |",
+                "|----------|----------|-------------|-------|",
+                f"| **PolySignal (ours)** | **{metrics['accuracy']:.1%} ± {ci:.1%}** | **{metrics['avg_brier']:.4f}** | Multi-agent ensemble |",
+                f"| Coin flip | 50.0% | 0.2500 | Theoretical lower bound |",
+                f"| Always UP | {b['always_up']['accuracy']:.1%} ± {b['always_up']['ci']:.1%} | {b['always_up']['brier']:.4f} | UP rate = {b['up_rate']:.1%} |",
+                f"| Always DOWN | {b['always_down']['accuracy']:.1%} ± {b['always_down']['ci']:.1%} | {b['always_down']['brier']:.4f} | |",
+                f"| Crowd (Polymarket odds) | {b['crowd']['accuracy']:.1%} ± {b['crowd']['ci']:.1%} | {b['crowd']['brier']:.4f} | Follow majority odds |",
+            ]
+
+        if per_model:
+            lines += [
+                "",
+                "## Per-Model Accuracy (Ensemble Votes)",
+                "| Model | Votes | Correct | Accuracy | Brier |",
+                "|-------|-------|---------|----------|-------|",
+            ]
+            for label, d in sorted(per_model.items()):
+                lines.append(
+                    f"| {label} | {d['total']} | {d['correct']} | "
+                    f"{d['accuracy']:.1%} ± {d.get('ci', 0):.1%} | {d['avg_brier']:.4f} |"
+                )
 
     if newly_scored:
         lines += [

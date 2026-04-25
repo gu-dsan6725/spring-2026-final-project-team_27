@@ -11,7 +11,7 @@ KEY="${2:-~/Downloads/labsuser.pem}"
 REMOTE_USER="ec2-user"
 REMOTE_DIR="~/polysignal-btc-2"
 LOCAL_DB="./polysignal_btc.db"
-HOURS=12 
+HOURS=3.5  # Leave 30min buffer before lab closes
 
 if [ -z "$EC2_IP" ]; then
   echo "Usage: ./session_start.sh <EC2-IP> [path-to-key.pem]"

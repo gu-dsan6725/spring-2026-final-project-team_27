@@ -37,12 +37,13 @@ def check_env():
 
 
 async def run_once(api_key: str):
-    from collector import BTCCollector
-    from ensemble  import EnsembleAgent
-    from evaluator import EvaluatorAgent
-    from simulator import TradingSimulator, compute_sim_metrics
-    from reporter  import compute_metrics, print_report, save_report, save_analysis_log, print_sim_report
-    from storage   import init, save_prediction, get_all_evals, db_summary
+    from polysignal.collector import BTCCollector
+    from polysignal.ensemble  import EnsembleAgent
+    from polysignal.evaluator import EvaluatorAgent
+    from polysignal.simulator import TradingSimulator, compute_sim_metrics
+    from polysignal.reporter  import (compute_metrics, compute_baselines, compute_per_model_accuracy,
+                           print_report, save_report, save_analysis_log, print_sim_report)
+    from polysignal.storage   import init, save_prediction, get_all_evals, db_summary, get_resolved_predictions
 
     init()
 
@@ -100,13 +101,16 @@ async def run_once(api_key: str):
             )
 
         # ── Step 3: Predict (Debate if available, else Ensemble) ─────────────
-        from debate import is_available as debate_available, DebateAgent
+        from polysignal.debate import is_available as debate_available, DebateAgent
+        prediction = None
         if debate_available():
-            console.rule("[bold cyan]Step 3 — Debate Agent (Groq × OpenAI × Claude)[/bold cyan]")
+            console.rule("[bold cyan]Step 3 — Debate Agent (xAI Grok × OpenAI × Claude)[/bold cyan]")
             agent      = DebateAgent()
             prediction = await agent.debate(window)
-        else:
-            console.rule("[bold cyan]Step 3 — Ensemble Analyzer[/bold cyan]")
+            if prediction is None:
+                console.print("  [yellow]⚠ DebateAgent failed — falling back to EnsembleAgent[/yellow]")
+        if prediction is None:
+            console.rule("[bold cyan]Step 3 — Ensemble Analyzer (fallback)[/bold cyan]")
             ensemble   = EnsembleAgent(api_key=api_key)
             prediction = await ensemble.analyze(window)
 
@@ -142,13 +146,17 @@ async def run_once(api_key: str):
 
     # ── Step 5: Accuracy Report ───────────────────────────────────────────────
     console.rule("[bold cyan]Step 5 — Accuracy Report[/bold cyan]")
-    evals   = get_all_evals()
-    metrics = compute_metrics(evals)
-    summary = db_summary()
+    evals          = get_all_evals()
+    metrics        = compute_metrics(evals)
+    summary        = db_summary()
+    resolved_preds = get_resolved_predictions()
+    baselines      = compute_baselines(resolved_preds)
+    per_model      = compute_per_model_accuracy(resolved_preds)
 
-    print_report(metrics, summary)
+    print_report(metrics, summary, baselines=baselines, per_model=per_model)
 
-    report_path   = save_report(metrics, summary, newly_scored)
+    report_path   = save_report(metrics, summary, newly_scored,
+                                baselines=baselines, per_model=per_model)
     analysis_path = save_analysis_log()
     console.print(f"\n[dim]Report   → [cyan]{report_path}[/cyan][/dim]")
     console.print(f"[dim]Analysis → [cyan]{analysis_path}[/cyan][/dim]")
@@ -232,19 +240,23 @@ async def run_live(api_key: str, hours: float = 1.0):
 
 
 def cmd_report():
-    from storage  import init, get_all_evals, db_summary
-    from reporter import compute_metrics, print_report, save_report
+    from polysignal.storage  import init, get_all_evals, db_summary, get_resolved_predictions
+    from polysignal.reporter import (compute_metrics, compute_baselines, compute_per_model_accuracy,
+                          print_report, save_report)
     init()
-    evals   = get_all_evals()
-    metrics = compute_metrics(evals)
-    summary = db_summary()
-    print_report(metrics, summary)
-    path = save_report(metrics, summary, [])
+    evals          = get_all_evals()
+    metrics        = compute_metrics(evals)
+    summary        = db_summary()
+    resolved_preds = get_resolved_predictions()
+    baselines      = compute_baselines(resolved_preds)
+    per_model      = compute_per_model_accuracy(resolved_preds)
+    print_report(metrics, summary, baselines=baselines, per_model=per_model)
+    path = save_report(metrics, summary, [], baselines=baselines, per_model=per_model)
     console.print(f"\n[dim]Report → [cyan]{path}[/cyan][/dim]")
 
 
 def cmd_analysis():
-    from storage  import init, get_recent_predictions
+    from polysignal.storage  import init, get_recent_predictions
     import json
     init()
     rows = get_recent_predictions(limit=12)
@@ -285,7 +297,7 @@ def cmd_analysis():
 
 
 def cmd_pending():
-    from storage import init, get_pending_predictions
+    from polysignal.storage import init, get_pending_predictions
     init()
     rows = get_pending_predictions()
     if not rows:

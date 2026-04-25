@@ -9,7 +9,7 @@ import re
 import anthropic
 from typing import Optional
 from loguru import logger
-from models import MarketWindow, Prediction
+from .models import MarketWindow, Prediction
 
 SYSTEM_PROMPT = """\
 You are a quantitative analyst specializing in ultra-short-term Bitcoin price prediction.

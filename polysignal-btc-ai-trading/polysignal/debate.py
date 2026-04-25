@@ -1,16 +1,16 @@
 """
 debate.py — Adversarial Debate Prediction Agent.
 
-Two LLMs (Groq and OpenAI) independently analyze the market, then read each
+Two LLMs (xAI Grok and OpenAI) independently analyze the market, then read each
 other's reasoning and write a rebuttal. A Claude judge reads all four outputs
 and delivers a final UP/DOWN prediction with calibrated confidence.
 
-Activation: both GROQ_API_KEY and OPENAI_API_KEY must be set in .env.
+Activation: both XAI_API_KEY and OPENAI_API_KEY must be set in .env.
 Fallback:   if either key is missing, is_available() returns False and the
             orchestrator falls back to EnsembleAgent silently.
 
 Debate protocol (3 rounds):
-  Round 1 — Independent analysis (Groq + OpenAI in parallel)
+  Round 1 — Independent analysis (xAI + OpenAI in parallel)
   Round 2 — Cross-examination  (each sees the other's Round 1, parallel)
   Round 3 — Judgment           (Claude reads all 4 outputs, decides)
 
@@ -27,18 +27,12 @@ from typing import Optional
 
 from loguru import logger
 
-from models import MarketWindow, Prediction
+from .models import MarketWindow, Prediction
 
-# ── Optional SDK imports (graceful if packages not installed) ─────────────────
-
-try:
-    from groq import AsyncGroq          # pip install groq
-    _GROQ_SDK = True
-except ImportError:
-    _GROQ_SDK = False
+# ── SDK imports ───────────────────────────────────────────────────────────────
 
 try:
-    from openai import AsyncOpenAI      # pip install openai
+    from openai import AsyncOpenAI      # used for both xAI and OpenAI
     _OPENAI_SDK = True
 except ImportError:
     _OPENAI_SDK = False
@@ -52,14 +46,15 @@ except ImportError:
 
 # ── Model config ──────────────────────────────────────────────────────────────
 
-GROQ_MODEL   = "llama-3.3-70b-versatile"   # fast, capable, free tier available
-OPENAI_MODEL = "gpt-4o-mini"               # cost-efficient, strong reasoning
-JUDGE_MODEL  = "claude-sonnet-4-6"         # judge — Claude stays in control
+XAI_MODEL    = "grok-3-mini"       # xAI Grok — fast momentum analyst
+OPENAI_MODEL = "gpt-4o-mini"       # OpenAI — contrarian analyst
+JUDGE_MODEL  = "claude-sonnet-4-6" # Claude — judge, stays in control
+XAI_BASE_URL = "https://api.x.ai/v1"
 
 
 # ── System prompts ────────────────────────────────────────────────────────────
 
-_GROQ_SYSTEM = """\
+_XAI_SYSTEM = """\
 You are a quantitative momentum trader specializing in ultra-short-term Bitcoin forecasting.
 Your edge is reading price velocity and volume signals. You are fast, direct, and data-driven.
 
@@ -117,7 +112,7 @@ Be specific. Reference the actual market data from the original prompt.
 Keep your rebuttal under 150 words.
 
 After your rebuttal, output your FINAL position as JSON on the last line:
-{"direction": "UP", "confidence": 0.55, "reasoning": "brief updated reasoning"}"""
+{{"direction": "UP", "confidence": 0.55, "reasoning": "brief updated reasoning"}}"""
 
 _JUDGE_SYSTEM = """\
 You are a senior quantitative researcher adjudicating a forecasting debate.
@@ -132,20 +127,20 @@ Rules:
 - Final confidence range: 0.50–0.65 max
 
 Return ONLY valid JSON:
-{"direction": "UP", "confidence": 0.55, "reasoning": "...", "winning_argument": "groq|openai|synthesis"}"""
+{"direction": "UP", "confidence": 0.55, "reasoning": "...", "winning_argument": "xai|openai|synthesis"}"""
 
 _JUDGE_PROMPT_TEMPLATE = """\
 === MARKET CONTEXT ===
 {market_prompt}
 
-=== GROQ ANALYST (Momentum Trader) ===
+=== XAI ANALYST / GROK (Momentum Trader) ===
 Round 1 — Initial position:
-  Direction: {groq_r1_dir} | Confidence: {groq_r1_conf:.0%}
-  Reasoning: {groq_r1_reasoning}
+  Direction: {xai_r1_dir} | Confidence: {xai_r1_conf:.0%}
+  Reasoning: {xai_r1_reasoning}
 
 Round 2 — Rebuttal:
-  {groq_r2}
-  Final position: {groq_r2_dir} | Confidence: {groq_r2_conf:.0%}
+  {xai_r2}
+  Final position: {xai_r2_dir} | Confidence: {xai_r2_conf:.0%}
 
 === OPENAI ANALYST (Contrarian) ===
 Round 1 — Initial position:
@@ -160,7 +155,7 @@ Round 2 — Rebuttal:
 Deliver the final prediction as JSON."""
 
 
-# ── Market prompt builder (shared with ensemble) ──────────────────────────────
+# ── Market prompt builder ─────────────────────────────────────────────────────
 
 _MARKET_PROMPT_TEMPLATE = """\
 Question:     {question}
@@ -187,20 +182,20 @@ def _build_market_prompt(w: MarketWindow) -> str:
     last5 = w.candles_1m[-5:] if w.candles_1m else []
     candle_summary = ("Last 5 closes: " + ", ".join(f"${c.close:,.2f}" for c in last5)) if last5 else ""
     return _MARKET_PROMPT_TEMPLATE.format(
-        question      = w.market_question,
-        window_start  = w.window_start.strftime("%H:%M"),
-        window_end    = w.window_end.strftime("%H:%M"),
-        up_price      = w.up_price,
-        down_price    = w.down_price,
-        btc_now       = w.btc_price_now,
-        c1m           = f"{w.price_change_1m:+.3f}%"  if w.price_change_1m  is not None else "N/A",
-        c5m           = f"{w.price_change_5m:+.3f}%"  if w.price_change_5m  is not None else "N/A",
-        c15m          = f"{w.price_change_15m:+.3f}%" if w.price_change_15m is not None else "N/A",
+        question       = w.market_question,
+        window_start   = w.window_start.strftime("%H:%M"),
+        window_end     = w.window_end.strftime("%H:%M"),
+        up_price       = w.up_price,
+        down_price     = w.down_price,
+        btc_now        = w.btc_price_now,
+        c1m            = f"{w.price_change_1m:+.3f}%"  if w.price_change_1m  is not None else "N/A",
+        c5m            = f"{w.price_change_5m:+.3f}%"  if w.price_change_5m  is not None else "N/A",
+        c15m           = f"{w.price_change_15m:+.3f}%" if w.price_change_15m is not None else "N/A",
         candle_summary = candle_summary,
-        rsi           = f"{w.rsi_14:.1f}"                    if w.rsi_14          is not None else "N/A",
-        vol           = f"${w.volatility_5m:,.2f} std dev"   if w.volatility_5m   is not None else "N/A",
-        volm          = f"{w.volume_5m:.2f} BTC"             if w.volume_5m       is not None else "N/A",
-        fg            = f"{w.fear_greed_score} ({w.fear_greed_label})" if w.fear_greed_score else "N/A",
+        rsi            = f"{w.rsi_14:.1f}"                    if w.rsi_14          is not None else "N/A",
+        vol            = f"${w.volatility_5m:,.2f} std dev"   if w.volatility_5m   is not None else "N/A",
+        volm           = f"{w.volume_5m:.2f} BTC"             if w.volume_5m       is not None else "N/A",
+        fg             = f"{w.fear_greed_score} ({w.fear_greed_label})" if w.fear_greed_score else "N/A",
     )
 
 
@@ -233,22 +228,19 @@ def _parse_json(text: str) -> Optional[dict]:
 # ── Availability check ────────────────────────────────────────────────────────
 
 def is_available() -> bool:
-    """Returns True only when both Groq and OpenAI keys are configured."""
-    groq_key  = os.getenv("GROQ_API_KEY", "").strip()
-    oai_key   = os.getenv("OPENAI_API_KEY", "").strip()
-    anth_key  = os.getenv("ANTHROPIC_API_KEY", "").strip()
+    """Returns True only when both XAI and OpenAI keys are configured."""
+    xai_key  = os.getenv("XAI_API_KEY", "").strip()
+    oai_key  = os.getenv("OPENAI_API_KEY", "").strip()
+    anth_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
 
-    if not groq_key:
-        logger.debug("[Debate] GROQ_API_KEY not set — DebateAgent unavailable")
+    if not xai_key:
+        logger.debug("[Debate] XAI_API_KEY not set — DebateAgent unavailable")
         return False
     if not oai_key:
         logger.debug("[Debate] OPENAI_API_KEY not set — DebateAgent unavailable")
         return False
     if not anth_key:
         logger.debug("[Debate] ANTHROPIC_API_KEY not set — DebateAgent unavailable")
-        return False
-    if not _GROQ_SDK:
-        logger.debug("[Debate] groq package not installed — run: pip install groq")
         return False
     if not _OPENAI_SDK:
         logger.debug("[Debate] openai package not installed — run: pip install openai")
@@ -260,7 +252,7 @@ def is_available() -> bool:
 
 class DebateAgent:
     """
-    Adversarial debate between Groq (momentum) and OpenAI (contrarian),
+    Adversarial debate between xAI Grok (momentum) and OpenAI (contrarian),
     judged by Claude Sonnet.
 
     Usage:
@@ -271,10 +263,10 @@ class DebateAgent:
     def __init__(self):
         if not is_available():
             raise RuntimeError(
-                "DebateAgent requires GROQ_API_KEY, OPENAI_API_KEY, and ANTHROPIC_API_KEY. "
+                "DebateAgent requires XAI_API_KEY, OPENAI_API_KEY, and ANTHROPIC_API_KEY. "
                 "Check is_available() before instantiating."
             )
-        self._groq   = AsyncGroq(api_key=os.getenv("GROQ_API_KEY"))
+        self._xai    = AsyncOpenAI(api_key=os.getenv("XAI_API_KEY"), base_url=XAI_BASE_URL)
         self._openai = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         self._claude = anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
@@ -283,84 +275,83 @@ class DebateAgent:
 
         # ── Round 1: Independent analysis (parallel) ──────────────────────────
         logger.info("[Debate] Round 1 — independent analysis...")
-        groq_r1, oai_r1 = await asyncio.gather(
-            self._groq_call(_GROQ_SYSTEM, market_prompt),
+        xai_r1, oai_r1 = await asyncio.gather(
+            self._xai_call(_XAI_SYSTEM, market_prompt),
             self._openai_call(_OPENAI_SYSTEM, market_prompt),
             return_exceptions=True,
         )
 
-        if isinstance(groq_r1, Exception) or groq_r1 is None:
-            logger.error(f"[Debate] Groq Round 1 failed: {groq_r1}")
+        if isinstance(xai_r1, Exception) or xai_r1 is None:
+            logger.error(f"[Debate] xAI Round 1 failed: {xai_r1}")
             return None
         if isinstance(oai_r1, Exception) or oai_r1 is None:
             logger.error(f"[Debate] OpenAI Round 1 failed: {oai_r1}")
             return None
 
         logger.info(
-            f"[Debate] R1 — Groq: {groq_r1['direction']} {groq_r1['confidence']:.0%} | "
+            f"[Debate] R1 — xAI: {xai_r1['direction']} {xai_r1['confidence']:.0%} | "
             f"OpenAI: {oai_r1['direction']} {oai_r1['confidence']:.0%}"
         )
 
         # ── Round 2: Cross-examination (parallel) ─────────────────────────────
         logger.info("[Debate] Round 2 — cross-examination...")
-        groq_rebuttal_prompt = (
+        xai_rebuttal_prompt = (
             market_prompt + "\n\n" +
             _REBUTTAL_TEMPLATE.format(
                 opp_direction  = oai_r1["direction"],
                 opp_confidence = oai_r1["confidence"],
                 opp_reasoning  = oai_r1.get("reasoning", ""),
                 opp_factors    = ", ".join(oai_r1.get("key_factors", [])),
-                my_direction   = groq_r1["direction"],
-                my_confidence  = groq_r1["confidence"],
+                my_direction   = xai_r1["direction"],
+                my_confidence  = xai_r1["confidence"],
             )
         )
         oai_rebuttal_prompt = (
             market_prompt + "\n\n" +
             _REBUTTAL_TEMPLATE.format(
-                opp_direction  = groq_r1["direction"],
-                opp_confidence = groq_r1["confidence"],
-                opp_reasoning  = groq_r1.get("reasoning", ""),
-                opp_factors    = ", ".join(groq_r1.get("key_factors", [])),
+                opp_direction  = xai_r1["direction"],
+                opp_confidence = xai_r1["confidence"],
+                opp_reasoning  = xai_r1.get("reasoning", ""),
+                opp_factors    = ", ".join(xai_r1.get("key_factors", [])),
                 my_direction   = oai_r1["direction"],
                 my_confidence  = oai_r1["confidence"],
             )
         )
 
-        groq_r2, oai_r2 = await asyncio.gather(
-            self._groq_call(_GROQ_SYSTEM, groq_rebuttal_prompt),
+        xai_r2, oai_r2 = await asyncio.gather(
+            self._xai_call(_XAI_SYSTEM, xai_rebuttal_prompt),
             self._openai_call(_OPENAI_SYSTEM, oai_rebuttal_prompt),
             return_exceptions=True,
         )
 
-        # Fallback to Round 1 positions if rebuttals fail
-        if isinstance(groq_r2, Exception) or groq_r2 is None:
-            logger.warning("[Debate] Groq rebuttal failed — using Round 1 position")
-            groq_r2 = groq_r1
+        if isinstance(xai_r2, Exception) or xai_r2 is None:
+            logger.warning("[Debate] xAI rebuttal failed — using Round 1 position")
+            xai_r2 = xai_r1
         if isinstance(oai_r2, Exception) or oai_r2 is None:
             logger.warning("[Debate] OpenAI rebuttal failed — using Round 1 position")
             oai_r2 = oai_r1
 
         logger.info(
-            f"[Debate] R2 — Groq: {groq_r2['direction']} {groq_r2['confidence']:.0%} | "
+            f"[Debate] R2 — xAI: {xai_r2['direction']} {xai_r2['confidence']:.0%} | "
             f"OpenAI: {oai_r2['direction']} {oai_r2['confidence']:.0%}"
         )
 
         # ── Round 3: Judge (Claude) ───────────────────────────────────────────
         logger.info("[Debate] Round 3 — Claude judge deliberating...")
         judge_prompt = _JUDGE_PROMPT_TEMPLATE.format(
-            market_prompt   = market_prompt,
-            groq_r1_dir     = groq_r1["direction"],
-            groq_r1_conf    = groq_r1["confidence"],
-            groq_r1_reasoning = groq_r1.get("reasoning", ""),
-            groq_r2         = groq_r2.get("reasoning", ""),
-            groq_r2_dir     = groq_r2["direction"],
-            groq_r2_conf    = groq_r2["confidence"],
-            oai_r1_dir      = oai_r1["direction"],
-            oai_r1_conf     = oai_r1["confidence"],
+            market_prompt    = market_prompt,
+            xai_r1_dir       = xai_r1["direction"],
+            xai_r1_conf      = xai_r1["confidence"],
+            xai_r1_reasoning = xai_r1.get("reasoning", ""),
+            xai_r2           = xai_r2.get("reasoning", ""),
+            xai_r2_dir       = xai_r2["direction"],
+            xai_r2_conf      = xai_r2["confidence"],
+            oai_r1_dir       = oai_r1["direction"],
+            oai_r1_conf      = oai_r1["confidence"],
             oai_r1_reasoning = oai_r1.get("reasoning", ""),
-            oai_r2          = oai_r2.get("reasoning", ""),
-            oai_r2_dir      = oai_r2["direction"],
-            oai_r2_conf     = oai_r2["confidence"],
+            oai_r2           = oai_r2.get("reasoning", ""),
+            oai_r2_dir       = oai_r2["direction"],
+            oai_r2_conf      = oai_r2["confidence"],
         )
 
         verdict = await self._claude_call(judge_prompt)
@@ -374,17 +365,17 @@ class DebateAgent:
             logger.error(f"[Debate] Judge returned invalid direction: {direction}")
             return None
 
-        confidence = min(max(confidence, 0.5), 0.65)
-
+        confidence  = min(max(confidence, 0.5), 0.65)
         winning_arg = verdict.get("winning_argument", "synthesis")
+
         reasoning = (
             f"[DEBATE — Judge: {winning_arg}]\n"
-            f"Groq ({GROQ_MODEL}): {groq_r1['direction']} R1 → {groq_r2['direction']} R2\n"
-            f"OpenAI ({OPENAI_MODEL}): {oai_r1['direction']} R1 → {oai_r2['direction']} R2\n\n"
+            f"xAI/{XAI_MODEL}: {xai_r1['direction']} R1 → {xai_r2['direction']} R2\n"
+            f"OpenAI/{OPENAI_MODEL}: {oai_r1['direction']} R1 → {oai_r2['direction']} R2\n\n"
             f"Judge reasoning: {verdict.get('reasoning', '')}"
         )
         key_factors = [
-            f"Groq final: {groq_r2['direction']} @ {groq_r2['confidence']:.0%}",
+            f"xAI final: {xai_r2['direction']} @ {xai_r2['confidence']:.0%}",
             f"OpenAI final: {oai_r2['direction']} @ {oai_r2['confidence']:.0%}",
             f"Winning argument: {winning_arg}",
         ]
@@ -410,14 +401,14 @@ class DebateAgent:
 
     # ── Private API call helpers ──────────────────────────────────────────────
 
-    async def _groq_call(self, system: str, user: str) -> Optional[dict]:
-        """Call Groq API and parse JSON response."""
+    async def _xai_call(self, system: str, user: str) -> Optional[dict]:
+        """Call xAI (Grok) API via OpenAI-compatible client."""
         try:
-            resp = await self._groq.chat.completions.create(
-                model    = GROQ_MODEL,
+            resp = await self._xai.chat.completions.create(
+                model    = XAI_MODEL,
                 messages = [
-                    {"role": "system",  "content": system},
-                    {"role": "user",    "content": user},
+                    {"role": "system", "content": system},
+                    {"role": "user",   "content": user},
                 ],
                 max_tokens  = 500,
                 temperature = 0.3,
@@ -425,10 +416,10 @@ class DebateAgent:
             text = resp.choices[0].message.content or ""
             data = _parse_json(text)
             if not data:
-                logger.warning(f"[Debate/Groq] Unparseable response: {text[:200]}")
+                logger.warning(f"[Debate/xAI] Unparseable response: {text[:200]}")
             return data
         except Exception as e:
-            logger.error(f"[Debate/Groq] API error: {e}")
+            logger.error(f"[Debate/xAI] API error: {e}")
             return None
 
     async def _openai_call(self, system: str, user: str) -> Optional[dict]:
@@ -437,8 +428,8 @@ class DebateAgent:
             resp = await self._openai.chat.completions.create(
                 model    = OPENAI_MODEL,
                 messages = [
-                    {"role": "system",  "content": system},
-                    {"role": "user",    "content": user},
+                    {"role": "system", "content": system},
+                    {"role": "user",   "content": user},
                 ],
                 max_tokens  = 500,
                 temperature = 0.3,
@@ -456,9 +447,9 @@ class DebateAgent:
         """Call Claude as judge and parse JSON verdict."""
         try:
             resp = await self._claude.messages.create(
-                model    = JUDGE_MODEL,
-                messages = [{"role": "user", "content": user}],
-                system   = _JUDGE_SYSTEM,
+                model      = JUDGE_MODEL,
+                messages   = [{"role": "user", "content": user}],
+                system     = _JUDGE_SYSTEM,
                 max_tokens = 400,
             )
             text = resp.content[0].text.strip()

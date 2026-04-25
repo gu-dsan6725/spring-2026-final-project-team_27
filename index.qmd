@@ -1,0 +1,58 @@
+---
+title: "PolySignal — BTC 5-Min AI Forecaster"
+subtitle: "DSAN 6725 Final Project · Georgetown University · Spring 2026"
+---
+
+## Overview
+
+PolySignal is a multi-agent AI system that predicts Bitcoin price direction on Polymarket's 5-minute derivative markets using an adversarial debate architecture: **xAI Grok** (momentum analyst) and **OpenAI GPT-4o-mini** (contrarian analyst) independently analyze each market window, challenge each other's reasoning in a structured cross-examination, and a **Claude Sonnet** judge delivers the final UP/DOWN verdict.
+
+## Dashboard
+
+The performance dashboard visualizes P&L, rolling accuracy, confidence calibration, and per-model breakdown from the 16-hour evaluation session. To run it locally:
+
+```bash
+cd polysignal-btc-ai-trading
+python3 -m streamlit run dashboard.py
+```
+
+## Deliverables
+
+| Item | Link |
+|------|------|
+| Project paper | [report.md](polysignal-btc-ai-trading/docs/report.md) |
+| Code repository | [GitHub](https://github.com/gu-dsan6725/spring-2026-final-project-team_27/tree/main/polysignal-btc-ai-trading) |
+| Results & evaluation | [Results page](results.qmd) |
+| Architecture | [Architecture page](architecture.qmd) |
+
+## System Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Orchestrator (run.py)                     │
+│          Every 5 minutes, synchronized to Polymarket         │
+└────────┬──────────────┬──────────────┬───────────────────────┘
+         │              │              │
+         ▼              ▼              ▼
+  ┌────────────┐ ┌────────────┐ ┌──────────────────────────┐
+  │ Evaluator  │ │ Collector  │ │     Debate Agent         │
+  │  (Step 1)  │ │  (Step 2)  │ │  xAI × OpenAI × Claude  │
+  └────────────┘ └────────────┘ └──────────────────────────┘
+```
+
+See the [Architecture page](architecture.qmd) for the full system design.
+
+## Key Findings
+
+Results from a continuous 16-hour data collection session (191 scored predictions, April 24, 2026):
+
+- **Directional accuracy:** 57.6% ± 7.0% (95% CI lower bound: 50.6% — statistically above coin flip)
+- **Brier score:** 0.2474 (vs 0.2500 random baseline)
+- **Crowd baseline (Polymarket odds):** 55.0% accuracy, Brier 0.2475 — PolySignal beats both
+- **xAI (Grok) individual accuracy:** 59.6% — strongest single model; 60.3% when judge sides with Grok alone
+- **OpenAI individual accuracy:** 49.5% — indistinguishable from random at 5-minute timescales
+- **Simulated ROI:** +$13,321 (+13.32%) on a $100,000 account over 191 trades
+
+## Team
+
+- Lance HDY — Georgetown University DSAN 6725, Spring 2026

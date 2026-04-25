@@ -1,0 +1,28 @@
+project:
+  type: website
+  output-dir: docs
+  render:
+    - index.qmd
+    - architecture.qmd
+    - results.qmd
+
+website:
+  title: "PolySignal — BTC 5-Min AI Forecaster"
+  description: "Multi-agent adversarial debate system for Bitcoin 5-minute prediction markets"
+  navbar:
+    left:
+      - href: index.qmd
+        text: Home
+      - href: architecture.qmd
+        text: Architecture
+      - href: results.qmd
+        text: Results
+    right:
+      - icon: github
+        href: https://github.com/gu-dsan6725/spring-2026-final-project-team_27
+
+format:
+  html:
+    theme: darkly
+    css: styles.css
+    toc: true

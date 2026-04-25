@@ -18,7 +18,7 @@ import websockets
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 from loguru import logger
-from models import MarketWindow, PriceCandle
+from .models import MarketWindow, PriceCandle
 
 GAMMA      = "https://gamma-api.polymarket.com"
 KRAKEN     = "https://api.kraken.com"
@@ -310,13 +310,10 @@ def _pct_change(now: float, prev: Optional[float]) -> Optional[float]:
 def _compute_rsi(closes: list, period: int = 14) -> Optional[float]:
     if len(closes) < period + 1:
         return None
-    deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
-    gains  = [d for d in deltas if d > 0]
-    losses = [-d for d in deltas if d < 0]
-    if not gains or not losses:
-        return 100.0 if not losses else 0.0
-    avg_gain = sum(gains[-period:]) / period
-    avg_loss = sum(losses[-period:]) / period
+    # Use the most recent `period` aligned price changes (SMA-based RSI)
+    deltas   = [closes[i] - closes[i - 1] for i in range(len(closes) - period, len(closes))]
+    avg_gain = sum(max(d, 0.0) for d in deltas) / period
+    avg_loss = sum(max(-d, 0.0) for d in deltas) / period
     if avg_loss == 0:
         return 100.0
     rs = avg_gain / avg_loss

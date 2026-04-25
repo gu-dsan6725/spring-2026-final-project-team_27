@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
-from models import Prediction, EvalRecord, Trade
+from .models import Prediction, EvalRecord, Trade
 
 DB = Path("polysignal_btc.db")
 
@@ -263,6 +263,23 @@ def get_all_trades() -> list[dict]:
     rows = conn.execute(
         "SELECT * FROM trades WHERE resolved=1 ORDER BY resolved_at DESC"
     ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_resolved_predictions() -> list[dict]:
+    """All resolved predictions joined with eval data — used for baseline and per-model analysis."""
+    conn = sqlite3.connect(DB)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("""
+        SELECT p.prediction_id, p.direction, p.confidence, p.market_up_odds,
+               p.actual_outcome, p.reasoning, p.key_factors,
+               e.was_correct, e.brier_score, e.price_change_pct,
+               e.btc_open, e.btc_close
+        FROM predictions p
+        JOIN eval_records e ON p.prediction_id = e.prediction_id
+        ORDER BY p.created_at ASC
+    """).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 

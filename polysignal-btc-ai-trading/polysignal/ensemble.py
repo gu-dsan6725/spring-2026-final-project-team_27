@@ -17,7 +17,7 @@ import re
 import anthropic
 from typing import Optional
 from loguru import logger
-from models import MarketWindow, Prediction, ModelVote
+from .models import MarketWindow, Prediction, ModelVote
 
 # ── Model roster ──────────────────────────────────────────────────────────────
 

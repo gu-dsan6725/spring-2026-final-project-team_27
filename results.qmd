@@ -1,0 +1,329 @@
+---
+title: "Results & Evaluation"
+---
+
+```{python}
+#| echo: false
+#| warning: false
+import sqlite3
+import json
+import re
+import pandas as pd
+import plotly.graph_objects as go
+from pathlib import Path
+
+DB_PATH = "polysignal-btc-ai-trading/polysignal_btc.db"
+
+conn = sqlite3.connect(DB_PATH)
+
+trades = pd.read_sql_query(
+    "SELECT * FROM trades WHERE resolved=1 ORDER BY resolved_at ASC", conn)
+evals = pd.read_sql_query(
+    "SELECT * FROM eval_records ORDER BY scored_at ASC", conn)
+account = pd.read_sql_query("SELECT * FROM account", conn)
+
+conn.close()
+
+if not trades.empty:
+    trades["resolved_at"] = pd.to_datetime(trades["resolved_at"])
+    trades["created_at"]  = pd.to_datetime(trades["created_at"])
+
+if not evals.empty:
+    evals["scored_at"]   = pd.to_datetime(evals["scored_at"])
+    evals["was_correct"] = evals["was_correct"].astype(bool)
+    evals["rolling_acc"] = evals["was_correct"].expanding().mean() * 100
+
+initial_balance = float(account["initial_balance"].iloc[0])
+current_balance = float(account["balance"].iloc[0])
+
+C = dict(green="#10b981", red="#f43f5e", blue="#38bdf8", yellow="#f59e0b")
+GRID  = "rgba(128,128,128,0.15)"
+MUTED = "#888"
+BASE  = dict(
+    paper_bgcolor="rgba(0,0,0,0)",
+    plot_bgcolor="rgba(0,0,0,0)",
+    font=dict(family="Inter, system-ui, sans-serif", color=MUTED, size=12),
+    margin=dict(l=10, r=10, t=30, b=10),
+)
+```
+
+## Evaluation Framework
+
+PolySignal is evaluated using the **Brier score** rather than raw accuracy alone. The Brier score penalizes overconfident wrong predictions quadratically, incentivizing honest uncertainty expression:
+
+$$BS = \frac{1}{N} \sum_{i=1}^{N} (f_i - o_i)^2$$
+
+| Brier Score | Meaning |
+|-------------|---------|
+| 0.00 | Perfect — always correct at 100% confidence |
+| 0.25 | Random — equivalent to always saying 50% |
+| 1.00 | Worst possible |
+
+---
+
+## Portfolio Performance
+
+```{python}
+#| echo: false
+#| warning: false
+bh = pd.concat([
+    pd.DataFrame({
+        "time":    [trades["created_at"].min() - pd.Timedelta(minutes=5)],
+        "balance": [initial_balance],
+        "won":     [None],
+    }),
+    trades[["resolved_at", "balance_after", "pnl"]].rename(
+        columns={"resolved_at": "time", "balance_after": "balance"}
+    ).assign(won=trades["pnl"] > 0),
+], ignore_index=True)
+
+_min = bh["balance"].min()
+_max = bh["balance"].max()
+_pad = (_max - _min) * 0.15 or 2000
+
+fig = go.Figure()
+fig.add_trace(go.Scatter(
+    x=bh["time"], y=bh["balance"],
+    mode="lines", line=dict(color=C["blue"], width=2.5),
+    fill="tozeroy", fillcolor="rgba(56,189,248,0.06)",
+    name="Balance",
+    hovertemplate="<b>%{x|%b %d %H:%M}</b><br>$%{y:,.2f}<extra></extra>",
+))
+fig.add_trace(go.Scatter(
+    x=bh[bh["won"]==True]["time"], y=bh[bh["won"]==True]["balance"],
+    mode="markers", marker=dict(color=C["green"], size=7),
+    name="Win",
+    hovertemplate="WIN — $%{y:,.2f}<extra></extra>",
+))
+fig.add_trace(go.Scatter(
+    x=bh[bh["won"]==False]["time"], y=bh[bh["won"]==False]["balance"],
+    mode="markers", marker=dict(color=C["red"], size=7),
+    name="Loss",
+    hovertemplate="LOSS — $%{y:,.2f}<extra></extra>",
+))
+fig.add_hline(y=initial_balance, line_dash="dot", line_color=GRID, line_width=1.5,
+              annotation_text="Starting $100k", annotation_position="bottom right",
+              annotation_font=dict(color=MUTED, size=11))
+fig.update_layout(**BASE, height=360,
+    yaxis=dict(tickprefix="$", tickformat=",.0f", gridcolor=GRID,
+               linecolor=GRID, zeroline=False, range=[_min-_pad, _max+_pad]),
+    xaxis=dict(gridcolor=GRID, linecolor=GRID, zeroline=False),
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+                bgcolor="rgba(0,0,0,0)"),
+    hovermode="x unified",
+    title="Account Balance Over Time")
+fig.show()
+```
+
+```{python}
+#| echo: false
+#| warning: false
+fig2 = go.Figure(go.Bar(
+    x=list(range(1, len(trades)+1)),
+    y=trades["pnl"],
+    marker_color=[C["green"] if p > 0 else C["red"] for p in trades["pnl"]],
+    marker_opacity=0.85,
+    hovertemplate="Trade #%{x}<br>P&L: $%{y:,.2f}<extra></extra>",
+))
+fig2.add_hline(y=0, line_color=GRID, line_width=1.5)
+fig2.update_layout(**BASE, height=280,
+    xaxis=dict(title="Trade #", gridcolor=GRID, linecolor=GRID, zeroline=False),
+    yaxis=dict(tickprefix="$", gridcolor=GRID, linecolor=GRID, zeroline=False),
+    showlegend=False, title="P&L Per Trade")
+fig2.show()
+```
+
+| Metric | Value |
+|--------|-------|
+| Starting balance | $100,000.00 |
+| Final balance | **$113,321.74** |
+| Total P&L | **+$13,321.74 (+13.32%)** |
+| Trades | 191 |
+| Win / Loss | 110W / 81L |
+| Avg win | +$525.16 |
+| Avg loss | −$500.00 |
+
+---
+
+## Baseline Comparison
+
+| Strategy | Accuracy | Brier Score | vs PolySignal |
+|----------|----------|-------------|---------------|
+| **PolySignal-BTC5 (ours)** | **57.6%** | **0.2474** | — |
+| Crowd (Polymarket odds) | 55.0% | 0.2475 | −2.6% |
+| Coin flip | 50.0% | 0.2500 | −7.6% |
+| Always DOWN | 50.3% | 0.4974 | −7.3% |
+| Always UP | 49.7% | 0.5026 | −7.9% |
+
+PolySignal outperforms all four baselines on directional accuracy. The 2.6 percentage point edge over the Polymarket crowd — financially incentivized traders with access to the same data — is the most meaningful comparison.
+
+---
+
+## Rolling Directional Accuracy
+
+```{python}
+#| echo: false
+#| warning: false
+fig3 = go.Figure()
+fig3.add_trace(go.Scatter(
+    x=evals["scored_at"], y=evals["rolling_acc"],
+    mode="lines", line=dict(color=C["yellow"], width=2.5),
+    fill="tozeroy", fillcolor="rgba(245,158,11,0.07)",
+    hovertemplate="%{x|%b %d %H:%M}<br>Accuracy: %{y:.1f}%<extra></extra>",
+))
+fig3.add_hline(y=50, line_dash="dot", line_color=GRID, line_width=1.5,
+               annotation_text="50% baseline", annotation_position="bottom right",
+               annotation_font=dict(color=MUTED, size=11))
+fig3.add_hline(y=55, line_dash="dot", line_color="rgba(16,185,129,0.3)", line_width=1,
+               annotation_text="Crowd baseline (55%)", annotation_position="top right",
+               annotation_font=dict(color=C["green"], size=11))
+fig3.update_layout(**BASE, height=300,
+    xaxis=dict(gridcolor=GRID, linecolor=GRID, zeroline=False),
+    yaxis=dict(ticksuffix="%", range=[30, 80], gridcolor=GRID,
+               linecolor=GRID, zeroline=False),
+    showlegend=False, title="Rolling Directional Accuracy")
+fig3.show()
+```
+
+---
+
+## Per-Model Accuracy
+
+```{python}
+#| echo: false
+#| warning: false
+conn2 = sqlite3.connect(DB_PATH)
+rows = conn2.execute("""
+    SELECT p.direction, p.confidence, p.actual_outcome, p.reasoning, p.key_factors
+    FROM predictions p
+    JOIN eval_records e ON p.prediction_id = e.prediction_id
+    ORDER BY p.created_at ASC
+""").fetchall()
+conn2.close()
+
+models = {}
+def _record(label, direction, confidence, actual):
+    correct = (direction.upper() == actual)
+    b = (confidence - (1.0 if correct else 0.0)) ** 2
+    if label not in models:
+        models[label] = {"total": 0, "correct": 0, "brier_sum": 0.0}
+    models[label]["total"]     += 1
+    models[label]["correct"]   += int(correct)
+    models[label]["brier_sum"] += b
+
+for direction, confidence, actual, reasoning, kf_raw in rows:
+    if not actual:
+        continue
+    if reasoning and reasoning.startswith("[ENSEMBLE"):
+        m = re.search(r'Votes: (\[.*?\])', reasoning)
+        if m:
+            try:
+                for vote in json.loads(m.group(1)):
+                    _record(vote.get("model","?"), str(vote.get("direction","")),
+                            float(vote.get("confidence",0.5)), actual)
+            except Exception:
+                pass
+    elif reasoning and reasoning.startswith("[DEBATE"):
+        try:
+            kf = json.loads(kf_raw) if kf_raw else []
+        except Exception:
+            kf = []
+        for item in kf:
+            fm = re.match(r'(xAI|OpenAI) final: (UP|DOWN) @ (\d+)%', str(item))
+            if fm:
+                lbl = "xAI (Grok)" if fm.group(1)=="xAI" else "OpenAI (GPT-4o-mini)"
+                _record(lbl, fm.group(2), float(fm.group(3))/100, actual)
+        _record("Claude (Judge)", direction, float(confidence), actual)
+
+pm_rows = []
+for label, d in sorted(models.items()):
+    t, c = d["total"], d["correct"]
+    acc = c/t if t > 0 else 0.0
+    pm_rows.append({"Model": label, "Votes": t, "Correct": c, "Accuracy": acc,
+                    "Avg Brier": round(d["brier_sum"]/t, 4) if t > 0 else 0.0})
+pm_df = pd.DataFrame(pm_rows)
+
+fig4 = go.Figure(go.Bar(
+    x=pm_df["Model"], y=pm_df["Accuracy"]*100,
+    marker_color=[C["green"] if a>=0.55 else C["yellow"] if a>=0.50 else C["red"]
+                  for a in pm_df["Accuracy"]],
+    marker_opacity=0.85,
+    text=[f"{a:.1%}" for a in pm_df["Accuracy"]],
+    textposition="outside",
+    textfont=dict(size=12, color=MUTED),
+    hovertemplate="%{x}<br>Accuracy: %{y:.1f}%<br>Votes: %{customdata}<extra></extra>",
+    customdata=pm_df["Votes"],
+))
+fig4.add_hline(y=50, line_dash="dot", line_color=GRID, line_width=1.5,
+               annotation_text="50% baseline", annotation_position="bottom right",
+               annotation_font=dict(color=MUTED, size=11))
+fig4.update_layout(**BASE, height=300,
+    xaxis=dict(gridcolor=GRID, linecolor=GRID, zeroline=False),
+    yaxis=dict(ticksuffix="%", range=[0, 90], gridcolor=GRID,
+               linecolor=GRID, zeroline=False),
+    showlegend=False, title="Per-Model Directional Accuracy")
+fig4.show()
+```
+
+| Model | Role | Votes | Accuracy | Brier |
+|-------|------|-------|----------|-------|
+| **xAI Grok-3-mini** | Momentum analyst | 188 | **59.6% ± 7.0%** | **0.2436** |
+| **Claude Sonnet 4.6** | Judge / final verdict | 188 | **57.4% ± 7.1%** | **0.2469** |
+| OpenAI GPT-4o-mini | Contrarian analyst | 188 | 49.5% ± 7.1% | 0.2532 |
+
+---
+
+## Debate Winner Analysis
+
+| Judge's ruling | Count | Correct | Accuracy |
+|----------------|-------|---------|----------|
+| xAI argument wins | 63 | 38 | **60.3%** |
+| Synthesis (both) | 121 | 69 | 57.0% |
+| OpenAI argument wins | 4 | 1 | 25.0% |
+
+When Claude sided entirely with the momentum analyst, accuracy rose to 60.3%. When it incorporated the contrarian view, it fell to 57.0%. The debate's value lies not in both sides being right, but in the judge knowing which one to trust.
+
+---
+
+## Confidence Calibration
+
+```{python}
+#| echo: false
+#| warning: false
+bins   = [(0.50,0.55),(0.55,0.60),(0.60,0.65),(0.65,1.01)]
+labels = ["50–55%","55–60%","60–65%","65%+"]
+act_acc, avg_con = [], []
+for lo, hi in bins:
+    mask = (evals["confidence"]>=lo) & (evals["confidence"]<hi)
+    sub  = evals[mask]
+    if len(sub) > 0:
+        act_acc.append(sub["was_correct"].mean()*100)
+        avg_con.append(sub["confidence"].mean()*100)
+    else:
+        act_acc.append(None); avg_con.append(None)
+
+fig5 = go.Figure()
+fig5.add_trace(go.Bar(name="Actual Accuracy", x=labels, y=act_acc,
+    marker_color=C["blue"], marker_opacity=0.85,
+    hovertemplate="%{x}<br>Actual: %{y:.1f}%<extra></extra>"))
+fig5.add_trace(go.Bar(name="Avg Confidence", x=labels, y=avg_con,
+    marker_color=C["yellow"], marker_opacity=0.7,
+    hovertemplate="%{x}<br>Confidence: %{y:.1f}%<extra></extra>"))
+fig5.add_hline(y=50, line_dash="dot", line_color=GRID, line_width=1.5)
+fig5.update_layout(**BASE, height=300, barmode="group",
+    xaxis=dict(gridcolor=GRID, linecolor=GRID, zeroline=False),
+    yaxis=dict(ticksuffix="%", range=[0,100], gridcolor=GRID,
+               linecolor=GRID, zeroline=False),
+    legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                bgcolor="rgba(0,0,0,0)"),
+    title="Confidence Calibration")
+fig5.show()
+```
+
+| Bin | N | Actual % | Avg Conf | Gap | Rating |
+|-----|---|----------|----------|-----|--------|
+| 50–55% | **180** | 57.2% | 52.8% | **4.4%** | **Well calibrated** |
+| 55–60% | 10 | 70.0% | 55.0% | 15.0% | Slightly off |
+| 60–65% | 1 | 0.0% | 61.3% | 61.3% | Insufficient data |
+
+94% of predictions fall in the 50–55% bin with a calibration gap of only 4.4%. The system almost never claims high confidence, and its low-confidence calls succeed at 57.2% — meaningfully above the stated 52.8%.
