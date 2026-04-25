@@ -1,4 +1,12 @@
-# Byte-compiled / optimized / DLL files
+# ── Generated poster/paper outputs ──────────────────────────────────────────
+poster.html
+poster.png
+make_poster.py
+
+# ── macOS ────────────────────────────────────────────────────────────────────
+.DS_Store
+
+# ── Byte-compiled / optimized / DLL files ───────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class

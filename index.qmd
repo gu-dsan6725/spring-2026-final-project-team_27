@@ -53,6 +53,3 @@ Results from a continuous 16-hour data collection session (191 scored prediction
 - **OpenAI individual accuracy:** 49.5% — indistinguishable from random at 5-minute timescales
 - **Simulated ROI:** +$13,321 (+13.32%) on a $100,000 account over 191 trades
 
-## Team
-
-- Lance HDY — Georgetown University DSAN 6725, Spring 2026
